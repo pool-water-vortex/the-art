@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>·</title>
+<meta name="theme-color" content="#060608">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23060608'/%3E%3Ccircle cx='8' cy='8' r='1.6' fill='%23dcd6cc'/%3E%3C/svg%3E">
+<style>
+  :root { color-scheme: dark; --bg: #060608; --bone: 220, 214, 204; }
+  html, body { margin: 0; background: var(--bg); }
+  body { height: 760vh; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #marks { touch-action: pan-y; }
+  @media (hover: hover) { body, canvas, #snd { cursor: none; } }
+
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  #snd {
+    position: fixed; top: calc(18px + env(safe-area-inset-top)); right: calc(18px + env(safe-area-inset-right));
+    width: 30px; height: 30px; padding: 0; border: 0; background: transparent; appearance: none;
+    display: grid; place-items: center; opacity: .55; transition: opacity .6s;
+  }
+  #snd:hover, #snd:focus-visible { opacity: 1; outline: 0; }
+  #snd::before { content: ""; width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(var(--bone), .9); box-sizing: border-box; transition: background .5s, transform .5s; }
+  #snd[aria-pressed="true"]::before { background: rgba(var(--bone), .9); animation: breathe 5.4s ease-in-out infinite; }
+  @keyframes breathe { 50% { transform: scale(1.5); } }
+
+  noscript .dot { position: fixed; left: 50%; top: 50%; width: 3px; height: 3px; margin: -1.5px; border-radius: 50%; background: rgb(var(--bone)); }
+
+  @media (prefers-reduced-motion: reduce) { #snd[aria-pressed="true"]::before { animation: none; } }
+</style>
+</head>
+<body>
+<p class="sr">鬼才の芸術家のプロフィール。言葉は置かれていない。一つの点から始まり、線が引かれ、線は砕けて嵐になり、触れた跡が傷として残り、最後に閉じない円が描かれる。</p>
+<noscript><div class="dot"></div></noscript>
+
+<canvas id="base"></canvas>
+<canvas id="storm"></canvas>
+<canvas id="marks"></canvas>
+<button id="snd" type="button" aria-pressed="false" aria-label="音"></button>
+
+<script>
+(() => {
+'use strict';
+
+const RM   = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const DPR  = Math.min(window.devicePixelRatio || 1, 2);
+const BONE = [220, 214, 204];
+const EMBER = [214, 72, 40];
+const COLD  = [112, 128, 156];
+
+const base  = document.getElementById('base');
+const storm = document.getElementById('storm');
+const marks = document.getElementById('marks');
+const bx = base.getContext('2d');
+const sx = storm.getContext('2d');
+const mx = marks.getContext('2d');
+
+let W = 0, H = 0, S = 0, CX = 0, CY = 0;
+
+const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+const lerp  = (a, b, t) => a + (b - a) * t;
+const ease  = t => t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ------------------------------------------------------------------
+   線  the past does not change: one fixed seed, one line.
+------------------------------------------------------------------- */
+const N = 1700;
+const LIFE = (() => {
+  const r = mulberry32(19840307);
+  const pts = [];
+  let x = 0, y = 0, a = -Math.PI / 2, scar = 0, gap = 0;
+  for (let i = 0; i < N; i++) {
+    const speed = 0.0022 + 0.0030 * Math.abs(Math.sin(i * 0.011 + 0.7));
+    a += (r() - 0.5) * 0.24;
+    if (r() < 0.008) { a += (r() < 0.5 ? -1 : 1) * (Math.PI * 0.5 + r() * Math.PI * 0.45); scar = 8 + (r() * 26 | 0); }
+    if (r() < 0.005) gap = 5 + (r() * 20 | 0);
+    x += Math.cos(a) * speed; y += Math.sin(a) * speed;
+    if (Math.abs(x) > 0.92) { a = Math.PI - a + (r() - 0.5) * 0.5; x = Math.sign(x) * 0.92; }
+    if (Math.abs(y) > 0.92) { a = -a + (r() - 0.5) * 0.5; y = Math.sign(y) * 0.92; }
+    const w = 0.5 + Math.abs(Math.sin(i * 0.06) + (r() - 0.5) * 0.9) * 0.8 + (scar > 0 ? 1.4 : 0);
+    pts.push({ x, y, w, scar: scar > 0, gap: gap > 0 });
+    if (scar > 0) scar--;
+    if (gap > 0) gap--;
+  }
+  return pts;
+})();
+
+/* ------------------------------------------------------------------
+   円  the unclosed circle. same hand, every time.
+------------------------------------------------------------------- */
+const EK = 160;
+const ENSO = (() => {
+  const r = mulberry32(7);
+  const out = [];
+  const a0 = -1.85, sweep = 5.05;
+  let jit = 0;
+  for (let k = 0; k <= EK; k++) {
+    const u = k / EK;
+    jit = jit * 0.86 + (r() - 0.5) * 0.02;
+    const ang = a0 + sweep * u;
+    const rad = 1 + jit + Math.sin(u * 9.1) * 0.012;
+    const w = (Math.pow(1 - u, 0.55) * 9 + 0.6) * (0.85 + Math.abs(Math.sin(u * 23 + 1)) * 0.3);
+    out.push({ ang, rad, w });
+  }
+  return out;
+})();
+
+/* ------------------------------------------------------------------
+   嵐  particles released from the line.
+------------------------------------------------------------------- */
+const PN = (Math.min(innerWidth, innerHeight) < 600 ? 900 : 1700);
+const P = new Float32Array(PN * 4);
+let seeded = false;
+
+function seedParticles() {
+  for (let i = 0; i < PN; i++) {
+    const j = Math.floor(i / PN * (N - 1));
+    const q = LIFE[j];
+    P[i * 4]     = CX + q.x * S;
+    P[i * 4 + 1] = CY + q.y * S;
+    P[i * 4 + 2] = 0;
+    P[i * 4 + 3] = 0;
+  }
+  seeded = true;
+}
+
+function field(x, y, t) {
+  const s = 0.0031;
+  return (Math.sin(x * s + t * 0.37) + Math.cos(y * s * 1.31 - t * 0.29) + Math.sin((x + y) * s * 0.57 + t * 0.19)) * 1.9;
+}
+
+/* ------------------------------------------------------------------
+   手  the pointer. speed becomes heat. heat becomes colour.
+------------------------------------------------------------------- */
+const ptr = { x: -9999, y: -9999, px: -9999, py: -9999, speed: 0, heat: 0, mouse: false, seen: false, down: false, lx: 0, ly: 0 };
+
+function onMove(e) {
+  if (e.pointerType === 'mouse') ptr.mouse = true;
+  if (ptr.seen) {
+    const dx = e.clientX - ptr.x, dy = e.clientY - ptr.y;
+    ptr.speed = Math.min(Math.hypot(dx, dy), 80);
+  }
+  ptr.x = e.clientX; ptr.y = e.clientY; ptr.seen = true;
+  if (ptr.down) stroke(ptr.lx, ptr.ly, ptr.x, ptr.y);
+  ptr.lx = ptr.x; ptr.ly = ptr.y;
+}
+function onDown(e) {
+  if (e.button !== 0 && e.pointerType === 'mouse') return;
+  ptr.down = true; ptr.x = ptr.lx = e.clientX; ptr.y = ptr.ly = e.clientY; ptr.seen = true;
+  if (e.pointerType === 'mouse') ptr.mouse = true;
+  marks.setPointerCapture && e.pointerType !== 'touch' && marks.setPointerCapture(e.pointerId);
+  spit(ptr.x, ptr.y, 1);
+  burst();
+}
+function onUp() { ptr.down = false; }
+
+marks.addEventListener('pointermove', onMove, { passive: true });
+marks.addEventListener('pointerdown', onDown);
+marks.addEventListener('pointerup', onUp);
+marks.addEventListener('pointercancel', onUp);
+marks.addEventListener('pointerleave', () => { if (!ptr.down) { ptr.x = ptr.y = -9999; } });
+
+/* ------------------------------------------------------------------
+   傷  what the viewer leaves behind. it fades over minutes, never fully.
+------------------------------------------------------------------- */
+function heatColor(h) {
+  return `${Math.round(lerp(COLD[0], EMBER[0], h))},${Math.round(lerp(COLD[1], EMBER[1], h))},${Math.round(lerp(COLD[2], EMBER[2], h))}`;
+}
+function stroke(x0, y0, x1, y1) {
+  const h = clamp(ptr.heat * 1.4);
+  const w = 1.2 + Math.min(ptr.speed, 60) * 0.16;
+  mx.globalCompositeOperation = 'source-over';
+  mx.lineCap = 'round'; mx.lineJoin = 'round';
+  mx.strokeStyle = `rgba(${heatColor(h)},${0.75 + h * 0.2})`;
+  mx.lineWidth = w;
+  mx.beginPath(); mx.moveTo(x0, y0); mx.lineTo(x1, y1); mx.stroke();
+  // thin ghost beside the stroke
+  mx.lineWidth = Math.max(0.5, w * 0.18);
+  mx.strokeStyle = `rgba(${BONE.join(',')},0.35)`;
+  const ox = (y1 - y0), oy = -(x1 - x0), l = Math.hypot(ox, oy) || 1, k = (w * 0.9) / l;
+  mx.beginPath(); mx.moveTo(x0 + ox * k, y0 + oy * k); mx.lineTo(x1 + ox * k, y1 + oy * k); mx.stroke();
+  if (ptr.speed > 28) spit(x1, y1, (ptr.speed - 28) / 52);
+}
+function spit(x, y, k) {
+  const n = 2 + Math.round(k * 9);
+  const h = clamp(ptr.heat * 1.4);
+  mx.globalCompositeOperation = 'source-over';
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, d = Math.pow(Math.random(), 1.6) * (8 + k * 46);
+    const r = 0.4 + Math.random() * (0.8 + k * 1.6);
+    mx.fillStyle = `rgba(${heatColor(h)},${0.3 + Math.random() * 0.6})`;
+    mx.beginPath(); mx.arc(x + Math.cos(a) * d, y + Math.sin(a) * d, r, 0, Math.PI * 2); mx.fill();
+  }
+}
+
+/* ------------------------------------------------------------------
+   音  a drone. pitch follows the page, breath follows the hand.
+------------------------------------------------------------------- */
+const sndBtn = document.getElementById('snd');
+let AC = null, A = null, soundOn = false;
+
+function buildAudio() {
+  AC = new (window.AudioContext || window.webkitAudioContext)();
+  const master = AC.createGain(); master.gain.value = 0;
+  const filt = AC.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 220; filt.Q.value = 3.5;
+  const o1 = AC.createOscillator(), o2 = AC.createOscillator(), o3 = AC.createOscillator();
+  o1.type = 'sawtooth'; o2.type = 'sawtooth'; o3.type = 'sine';
+  const g1 = AC.createGain(), g2 = AC.createGain(), g3 = AC.createGain();
+  g1.gain.value = 0.22; g2.gain.value = 0.22; g3.gain.value = 0.6;
+  o1.connect(g1).connect(filt); o2.connect(g2).connect(filt); o3.connect(g3).connect(filt);
+  const lfo = AC.createOscillator(), lfoG = AC.createGain();
+  lfo.frequency.value = 1 / 5.4; lfoG.gain.value = 0.35;
+  const breath = AC.createGain(); breath.gain.value = 0.7;
+  lfo.connect(lfoG).connect(breath.gain);
+  filt.connect(breath).connect(master).connect(AC.destination);
+  o1.start(); o2.start(); o3.start(); lfo.start();
+  const nb = AC.createBuffer(1, AC.sampleRate * 0.4, AC.sampleRate);
+  const d = nb.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  A = { master, filt, o1, o2, o3, nb };
+}
+function setSound(on) {
+  soundOn = on;
+  sndBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  if (on) {
+    if (!AC) buildAudio();
+    AC.resume();
+    A.master.gain.cancelScheduledValues(AC.currentTime);
+    A.master.gain.setTargetAtTime(0.09, AC.currentTime, 1.2);
+  } else if (AC) {
+    A.master.gain.cancelScheduledValues(AC.currentTime);
+    A.master.gain.setTargetAtTime(0, AC.currentTime, 0.6);
+  }
+}
+function tuneAudio(t, heat) {
+  if (!soundOn || !A) return;
+  const f = 46 * Math.pow(2, t * 1.25);
+  const now = AC.currentTime;
+  A.o1.frequency.setTargetAtTime(f, now, 0.4);
+  A.o2.frequency.setTargetAtTime(f * 1.0045, now, 0.4);
+  A.o3.frequency.setTargetAtTime(f / 2, now, 0.4);
+  A.filt.frequency.setTargetAtTime(150 + heat * 2600, now, 0.08);
+}
+function burst() {
+  if (!soundOn || !A) return;
+  const s = AC.createBufferSource(); s.buffer = A.nb;
+  const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 600 + ptr.heat * 2400; bp.Q.value = 1.4;
+  const g = AC.createGain(); g.gain.setValueAtTime(0.0001, AC.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.18 + ptr.heat * 0.3, AC.currentTime + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 0.3);
+  s.connect(bp).connect(g).connect(AC.destination); s.start(); s.stop(AC.currentTime + 0.35);
+}
+sndBtn.addEventListener('click', e => { e.stopPropagation(); setSound(!soundOn); });
+
+/* ------------------------------------------------------------------
+   器  canvases.
+------------------------------------------------------------------- */
+function fit(c, ctx) {
+  c.width = Math.round(W * DPR); c.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+function resize() {
+  const keep = document.createElement('canvas');
+  if (marks.width) { keep.width = marks.width; keep.height = marks.height; keep.getContext('2d').drawImage(marks, 0, 0); }
+  W = innerWidth; H = innerHeight; S = Math.min(W, H) * 0.47; CX = W / 2; CY = H / 2;
+  fit(base, bx); fit(storm, sx); fit(marks, mx);
+  if (keep.width) { mx.save(); mx.setTransform(1, 0, 0, 1, 0, 0); mx.drawImage(keep, 0, 0, marks.width, marks.height); mx.restore(); }
+  seeded = false;
+}
+addEventListener('resize', resize);
+resize();
+
+/* ------------------------------------------------------------------
+   時  scroll is time. real time tints the room.
+------------------------------------------------------------------- */
+let tRaw = 0, t = 0;
+function readScroll() {
+  const max = Math.max(1, document.documentElement.scrollHeight - innerHeight);
+  tRaw = clamp(scrollY / max);
+}
+addEventListener('scroll', readScroll, { passive: true });
+readScroll();
+
+const hour = new Date().getHours();
+const nightness = clamp(Math.cos((hour - 14) / 24 * Math.PI * 2) * -0.5 + 0.5); // 1 around 02:00, 0 around 14:00
+const ROOM = [Math.round(lerp(226, 206, nightness)), Math.round(lerp(218, 212, nightness)), Math.round(lerp(202, 224, nightness))];
+const roomRGB = ROOM.join(',');
+
+function pad(n) { return String(n).padStart(2, '0'); }
+const arrived = new Date();
+const STAMP = `${arrived.getFullYear()}.${pad(arrived.getMonth() + 1)}.${pad(arrived.getDate())}  ${pad(arrived.getHours())}:${pad(arrived.getMinutes())}`;
+
+/* ------------------------------------------------------------------
+   描  the frame.
+------------------------------------------------------------------- */
+let frame = 0, t0 = performance.now();
+
+function drawPoint(alpha, radius, tremble) {
+  const ox = tremble ? (Math.random() - 0.5) * tremble : 0;
+  const oy = tremble ? (Math.random() - 0.5) * tremble : 0;
+  const g = bx.createRadialGradient(CX + ox, CY + oy, 0, CX + ox, CY + oy, radius * 9);
+  g.addColorStop(0, `rgba(${roomRGB},${0.22 * alpha})`);
+  g.addColorStop(1, `rgba(${roomRGB},0)`);
+  bx.fillStyle = g;
+  bx.fillRect(CX + ox - radius * 9, CY + oy - radius * 9, radius * 18, radius * 18);
+  bx.fillStyle = `rgba(${roomRGB},${alpha})`;
+  bx.beginPath(); bx.arc(CX + ox, CY + oy, radius, 0, Math.PI * 2); bx.fill();
+}
+
+function drawLife(progress, alpha, time) {
+  const n = Math.max(0, Math.min(N, Math.floor(progress * N)));
+  if (n < 2) return;
+  bx.lineCap = 'round'; bx.lineJoin = 'round';
+  let curScar = null;
+  bx.beginPath();
+  for (let i = 1; i < n; i++) {
+    const p = LIFE[i], q = LIFE[i - 1];
+    if (p.gap) continue;
+    const isScar = p.scar;
+    if (curScar === null) curScar = isScar;
+    if (isScar !== curScar) {
+      bx.strokeStyle = curScar ? `rgba(${EMBER.join(',')},${alpha * 0.95})` : `rgba(${roomRGB},${alpha * 0.8})`;
+      bx.lineWidth = curScar ? 1.9 : 0.9;
+      bx.stroke(); bx.beginPath(); curScar = isScar;
+    }
+    bx.moveTo(CX + q.x * S, CY + q.y * S);
+    bx.lineTo(CX + p.x * S, CY + p.y * S);
+  }
+  bx.strokeStyle = curScar ? `rgba(${EMBER.join(',')},${alpha * 0.95})` : `rgba(${roomRGB},${alpha * 0.8})`;
+  bx.lineWidth = curScar ? 1.9 : 0.9;
+  bx.stroke();
+
+  // the pressure of the hand: a second pass, thicker where the line pressed harder
+  bx.beginPath();
+  for (let i = 1; i < n; i += 2) {
+    const p = LIFE[i], q = LIFE[i - 1];
+    if (p.gap || p.w < 1.1) continue;
+    bx.moveTo(CX + q.x * S, CY + q.y * S);
+    bx.lineTo(CX + p.x * S, CY + p.y * S);
+  }
+  bx.strokeStyle = `rgba(${roomRGB},${alpha * 0.22})`;
+  bx.lineWidth = 2.6;
+  bx.stroke();
+
+  if (n < N) {
+    const h = LIFE[n - 1];
+    const hx = CX + h.x * S, hy = CY + h.y * S;
+    const pulse = RM ? 1 : 1 + Math.sin(time * 9) * 0.25;
+    const g = bx.createRadialGradient(hx, hy, 0, hx, hy, 14 * pulse);
+    g.addColorStop(0, `rgba(${roomRGB},${0.5 * alpha})`);
+    g.addColorStop(1, `rgba(${roomRGB},0)`);
+    bx.fillStyle = g; bx.fillRect(hx - 14, hy - 14, 28, 28);
+    bx.fillStyle = `rgba(${roomRGB},${alpha})`;
+    bx.beginPath(); bx.arc(hx, hy, 1.6, 0, Math.PI * 2); bx.fill();
+  }
+}
+
+function drawEnso(progress, alpha) {
+  const k = Math.floor(progress * EK);
+  if (k < 1) return;
+  const R = Math.min(W, H) * 0.15;
+  bx.lineCap = 'round'; bx.lineJoin = 'round';
+  bx.strokeStyle = `rgba(${roomRGB},${alpha * 0.92})`;
+  for (let i = 1; i <= k; i++) {
+    const a = ENSO[i - 1], b = ENSO[i];
+    bx.lineWidth = b.w;
+    bx.beginPath();
+    bx.moveTo(CX + Math.cos(a.ang) * R * a.rad, CY + Math.sin(a.ang) * R * a.rad);
+    bx.lineTo(CX + Math.cos(b.ang) * R * b.rad, CY + Math.sin(b.ang) * R * b.rad);
+    bx.stroke();
+  }
+}
+
+function tick(now) {
+  frame++;
+  const time = (now - t0) / 1000;
+  t += (tRaw - t) * (RM ? 0.2 : 0.075);
+
+  // heat: the memory of how fast the hand moved
+  ptr.heat += ((ptr.speed / 48) - ptr.heat) * 0.06;
+  ptr.heat = clamp(ptr.heat);
+  ptr.speed *= 0.82;
+
+  // chapter weights
+  const release = clamp((t - 0.46) / 0.08);          // 線 → 嵐
+  const calm    = clamp((t - 0.72) / 0.12);          // 嵐 settles
+  const hush    = clamp((t - 0.90) / 0.05);          // everything recedes
+  const lifeP   = clamp((t - 0.12) / 0.34);          // the line is drawn
+  const ensoP   = clamp((t - 0.925) / 0.06);         // the circle
+  const stampA  = clamp((t - 0.986) / 0.014);        // the moment you arrived
+
+  /* base ------------------------------------------------------- */
+  bx.clearRect(0, 0, W, H);
+
+  // 点
+  const pointA = (1 - clamp((t - 0.12) / 0.03)) * (1 - release);
+  if (pointA > 0.001) {
+    const breath = RM ? 0.5 : (Math.sin(time * 1.16) + 1) / 2;
+    const tremble = clamp((t - 0.04) / 0.08) * 3.2;
+    drawPoint(pointA, 1.5 + breath * 1.1, RM ? 0 : tremble);
+  }
+  // a wordless hint, only at the very beginning
+  if (t < 0.025 && !RM) {
+    const ph = (time % 6.5) / 6.5;
+    if (ph < 0.45) {
+      const u = ph / 0.45;
+      bx.strokeStyle = `rgba(${roomRGB},${(1 - u) * 0.33})`;
+      bx.lineWidth = 1;
+      bx.beginPath(); bx.moveTo(CX, CY + 16); bx.lineTo(CX, CY + 16 + ease(u) * 26); bx.stroke();
+    }
+  }
+  // 線
+  if (lifeP > 0 && release < 1) drawLife(lifeP, 1 - release, time);
+  // 円
+  if (ensoP > 0) drawEnso(ensoP, 1);
+  // the point returns, smaller
+  const backA = clamp((t - 0.94) / 0.05);
+  if (backA > 0) drawPoint(backA * 0.9, 1.1, 0);
+  // stamp
+  if (stampA > 0) {
+    bx.font = '11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    bx.textAlign = 'center'; bx.textBaseline = 'alphabetic';
+    bx.fillStyle = `rgba(${roomRGB},${stampA * 0.42})`;
+    bx.fillText(STAMP, CX, H - 34);
+  }
+  // progress: one thin line on the right edge
+  bx.fillStyle = `rgba(${roomRGB},0.16)`;
+  bx.fillRect(W - 1, 0, 1, H * t);
+  // the hand
+  if (ptr.mouse && ptr.x > -1000) {
+    const r = 5 + ptr.heat * 11;
+    bx.strokeStyle = `rgba(${heatColor(clamp(ptr.heat * 1.4))},${0.5 + ptr.heat * 0.4})`;
+    bx.lineWidth = 1;
+    bx.beginPath(); bx.arc(ptr.x, ptr.y, r, 0, Math.PI * 2); bx.stroke();
+    if (ptr.down) { bx.fillStyle = `rgba(${EMBER.join(',')},0.9)`; bx.beginPath(); bx.arc(ptr.x, ptr.y, 1.6, 0, Math.PI * 2); bx.fill(); }
+  }
+
+  /* storm ------------------------------------------------------ */
+  const stormA = release * (1 - hush);
+  storm.style.opacity = stormA.toFixed(3);
+  if (release <= 0) {
+    if (seeded) { sx.clearRect(0, 0, W, H); seeded = false; }
+  } else {
+    if (!seeded) { sx.clearRect(0, 0, W, H); seedParticles(); }
+    sx.globalCompositeOperation = 'destination-out';
+    sx.fillStyle = `rgba(0,0,0,${RM ? 0.3 : 0.14 + calm * 0.1})`;
+    sx.fillRect(0, 0, W, H);
+    sx.globalCompositeOperation = 'source-over';
+
+    const h = clamp(ptr.heat * 1.4);
+    const force = (RM ? 0.03 : 0.085) * (1 - calm * 0.85) * release;
+    const damp = lerp(0.955, 0.9, calm);
+    const R = 110 + h * 170, R2 = R * R;
+    const hot = h > 0.22;
+    const pad = 24;
+    sx.fillStyle = `rgba(${heatColor(h)},${0.55 + h * 0.4})`;
+    const dotSize = 1.1 + h * 0.6;
+    for (let i = 0; i < PN; i++) {
+      const o = i * 4;
+      let x = P[o], y = P[o + 1], vx = P[o + 2], vy = P[o + 3];
+      const ang = field(x, y, time) + (i & 7) * 0.02;
+      vx += Math.cos(ang) * force + (Math.random() - 0.5) * 0.26;
+      vy += Math.sin(ang) * force + (Math.random() - 0.5) * 0.26;
+      if (ptr.x > -1000) {
+        const dx = x - ptr.x, dy = y - ptr.y, d2 = dx * dx + dy * dy;
+        if (d2 < R2 && d2 > 0.01) {
+          const d = Math.sqrt(d2), f = 1 - d / R;
+          if (hot) { const k = f * f * (1.2 + h * 9) * release; vx += dx / d * k; vy += dy / d * k; }
+          else     { const k = f * 0.18 * release;            vx -= dx / d * k; vy -= dy / d * k; }
+        }
+      }
+      vx *= damp; vy *= damp;
+      x += vx; y += vy;
+      if (x < -pad) x = W + pad; else if (x > W + pad) x = -pad;
+      if (y < -pad) y = H + pad; else if (y > H + pad) y = -pad;
+      P[o] = x; P[o + 1] = y; P[o + 2] = vx; P[o + 3] = vy;
+      sx.fillRect(x, y, dotSize, dotSize);
+    }
+  }
+
+  /* marks ------------------------------------------------------ */
+  if (frame % 6 === 0) {
+    mx.globalCompositeOperation = 'destination-out';
+    mx.fillStyle = 'rgba(0,0,0,0.012)';
+    mx.fillRect(0, 0, W, H);
+    mx.globalCompositeOperation = 'source-over';
+  }
+
+  if (frame % 4 === 0) tuneAudio(t, ptr.heat);
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
